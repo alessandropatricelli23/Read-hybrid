@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Read — PDF ▶ Audio (ibrido)</title>
+  <style>
+    :root { --bg:#f7f7f8; --fg:#111; --muted:#666; --card:#fff; --accent:#CF1919; }
+    *{box-sizing:border-box} body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:var(--bg);color:var(--fg)}
+    header{max-width:960px;margin:0 auto;padding:16px 16px 0}
+    h1{margin:0 0 4px;font-size:clamp(1.4rem,2.2vw,2rem)} .lead{color:var(--muted);margin:4px 0 16px}
+    .container{max-width:960px;margin:0 auto;padding:16px}.card{background:var(--card);border-radius:16px;box-shadow:0 1px 3px rgba(0,0,0,.06);padding:16px}
+    .grid{display:grid;gap:16px}@media(min-width:900px){.grid-2{grid-template-columns:1fr 1fr}}
+    label.file{display:block;border:2px dashed #ddd;border-radius:16px;padding:24px;text-align:center;cursor:pointer}
+    input[type=file]{display:none}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+    .btn{appearance:none;border:1px solid #ddd;background:#fff;padding:10px 14px;border-radius:12px;cursor:pointer}
+    .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn:disabled{opacity:.5;cursor:default}
+    .pill{font-size:12px;padding:4px 8px;border-radius:999px;background:#eee}.muted{color:var(--muted)}
+    textarea{width:100%;min-height:220px;border:1px solid #eee;border-radius:12px;padding:12px;font:inherit;line-height:1.45}
+    .progress{height:8px;background:#eee;border-radius:8px;overflow:hidden}.progress>div{height:100%;background:var(--accent);width:0%;transition:width .2s}
+    .note{font-size:12px;color:var(--muted);margin-top:6px}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Read</h1>
+    <p class="lead">PDF di qualsiasi dimensione (testo + immagini). OCR in cloud quando serve. Voce iOS di alta qualità.</p>
+  </header>
+
+  <div class="container grid grid-2">
+    <section class="card">
+      <h2>1) Carica PDF</h2>
+      <label class="file">
+        <input id="file" type="file" accept="application/pdf"/>
+        <div>Trascina o tocca per selezionare un PDF</div>
+      </label>
+      <div id="meta" class="muted" style="margin-top:8px"></div>
+      <div class="progress" style="margin-top:8px"><div id="bar"></div></div>
+      <div id="error" class="note" style="color:#b00020"></div>
+    </section>
+
+    <section class="card">
+      <h2>2) Impostazioni voce</h2>
+      <div class="grid">
+        <div>
+          <div class="muted" style="margin-bottom:6px">Voce</div>
+          <select id="voices"></select>
+        </div>
+        <div>
+          <div class="muted" style="margin-bottom:6px">Velocità: <span id="rateLabel">1.0x</span></div>
+          <input id="rate" type="range" min="0.8" max="1.6" step="0.1" value="1.0"/>
+        </div>
+        <div class="row">
+          <label class="row" style="gap:6px">
+            <input id="useSummary" type="checkbox"/>
+            <span>Usa riassunto (beta, gratuito)</span>
+          </label>
+          <span class="pill">opzionale</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="grid-column:1/-1">
+      <h2>3) Player</h2>
+      <div class="row" style="margin-bottom:8px">
+        <button id="play" class="btn primary" disabled>▶︎ Play</button>
+        <button id="pause" class="btn" disabled>Pausa</button>
+        <button id="resume" class="btn" disabled>Riprendi</button>
+        <button id="stop" class="btn" disabled>Stop</button>
+        <span id="status" class="pill">Pronto</span>
+      </div>
+      <textarea id="preview" placeholder="Anteprima testo..." readonly></textarea>
+    </section>
+  </div>
+
+  <footer class="container" style="color:#666;font-size:12px">
+    <b>Privacy:</b> il PDF non viene inviato su server. Solo le pagine-immagine (compresse) vanno all'OCR cloud.
+  </footer>
+
+  <!-- PDF.js (UMD) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.min.js"></script>
+  <script>if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.worker.min.js";</script>
+
+  <script>
+    const $=id=>document.getElementById(id);
+    const fileInput=$('file'), preview=$('preview'), meta=$('meta'), bar=$('bar'), errorEl=$('error');
+    const playBtn=$('play'), pauseBtn=$('pause'), resumeBtn=$('resume'), stopBtn=$('stop'), statusPill=$('status');
+    const voicesSel=$('voices'), rate=$('rate'), rateLabel=$('rateLabel'), useSummary=$('useSummary');
+
+    let fullText='', queue=[], chunks=[], playing=false;
+
+    function setStatus(t){ statusPill.textContent=t; }
+    function setControls({canPlay,canPause,canResume,canStop}){ playBtn.disabled=!canPlay; pauseBtn.disabled=!canPause; resumeBtn.disabled=!canResume; stopBtn.disabled=!canStop; }
+    function showError(msg){ errorEl.textContent=msg||''; }
+
+    function readAsArrayBuffer(file){
+      return new Promise((res,rej)=>{ const fr=new FileReader(); fr.onload=()=>res(fr.result); fr.onerror=rej; fr.readAsArrayBuffer(file); });
+    }
+
+    async function ocrPageCanvas(canvas){
+      const dataURL=canvas.toDataURL('image/jpeg',0.55); // comprime per risparmiare dati
+      const resp=await fetch('/.netlify/functions/ocr',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ imageBase64:dataURL, language:'ita' }) });
+      if(!resp.ok) throw new Error('OCR function error');
+      const {text}=await resp.json();
+      return text||'';
+    }
+
+    async function extractHybrid(file,onProgress){
+      const data=await readAsArrayBuffer(file);
+      const pdf=await pdfjsLib.getDocument({data}).promise;
+      let acc='';
+      for(let p=1;p<=pdf.numPages;p++){
+        const page=await pdf.getPage(p);
+        const content=await page.getTextContent();
+        const strings=content.items.map(it=>it.str).filter(Boolean);
+        let pageText=strings.join(' ').trim();
+
+        if(strings.length===0){
+          // pagina immagine → OCR cloud
+          setStatus(`OCR pagina ${p}/${pdf.numPages}…`);
+          const viewport=page.getViewport({scale:1.2}); // scala leggera
+          const canvas=document.createElement('canvas');
+          const ctx=canvas.getContext('2d');
+          canvas.width=viewport.width; canvas.height=viewport.height;
+          await page.render({canvasContext:ctx, viewport}).promise;
+          try{ pageText=(await ocrPageCanvas(canvas)).trim(); }
+          catch(e){ showError('OCR non disponibile (rete/APIs). Riprova.'); }
+        }
+        acc+=pageText+'\n';
+        onProgress?.(Math.round((p/pdf.numPages)*100),p,pdf.numPages);
+
+        // invio incrementale al player: si ascolta mentre elabora
+        if(pageText){
+          const newChunks = splitForTTS(pageText);
+          chunks.push(...newChunks);
+          if(playing) feedQueue();
+        }
+      }
+      return { text: acc, pages: pdf.numPages };
+    }
+
+    function sentences(text){ return text.replace(/\s+/g,' ').split(/(?<=[.!?])\s+(?=[A-ZÀ-ÖØ-Þ0-9\"\(])/).filter(s=>s&&s.length>20&&s.length<3000); }
+    function makeSummary(text){
+      const sents=sentences(text); if(!sents.length) return text;
+      const stop=new Set('a ad al allo alla ai agli alle con col coi da dal dallo della dei degli delle di del dello e ed che cui in nel nello nella nei negli nelle su sul sullo sulla sui sugli sulle per tra fra come anche pero quindi oppure se non piu meno molto poco sono essere siamo siete erano furono puo può devono deve hanno ha abbiamo avete avevano ho c\'è ma o il lo la i gli le un uno una degli delle del'.split(/\s+/));
+      const words=text.toLowerCase().replace(/[^a-zà-öø-ÿ0-9\s]/gi,' ').split(/\s+/).filter(w=>w&&!stop.has(w)&&w.length>2);
+      const freq=new Map(); for(const w of words) freq.set(w,(freq.get(w)||0)+1);
+      const maxF=Math.max(1,...freq.values()), norm=w=>(freq.get(w)||0)/maxF;
+      const scored=sents.map((s,i)=>{ const ws=s.toLowerCase().replace(/[^a-zà-öø-ÿ0-9\s]/gi,' ').split(/\s+/).filter(Boolean); const score=ws.reduce((a,w)=>a+norm(w),0)/Math.sqrt(ws.length+1); return {s,score,i}; }).sort((a,b)=>b.score-a.score);
+      const top=scored.slice(0,Math.min(12,Math.max(5,Math.round(sents.length*0.15)))).sort((a,b)=>a.i-b.i);
+      return top.map(t=>t.s).join(' ');
+    }
+    function splitForTTS(text,maxLen=180){
+      const out=[]; let buf=''; for(const s of sentences(text)){ if((buf+' '+s).length>maxLen){ if(buf.trim()) out.push(buf.trim()); buf=s; } else { buf=(buf+' '+s).trim(); } }
+      if(buf.trim()) out.push(buf.trim()); return out.length?out:[text];
+    }
+
+    function loadVoices(){
+      const list=speechSynthesis.getVoices(); voicesSel.innerHTML='';
+      const def=document.createElement('option'); def.value=''; def.textContent='Predefinita (consigliata)'; voicesSel.appendChild(def);
+      list.forEach(v=>{ const o=document.createElement('option'); o.value=v.name; o.textContent=`${v.name} (${v.lang})`; voicesSel.appendChild(o); });
+      const it=list.find(v=>/^it/i.test(v.lang)); if(it){ voicesSel.value=it.name; }
+    }
+    loadVoices(); speechSynthesis.onvoiceschanged=loadVoices;
+    rate.addEventListener('input',()=>rateLabel.textContent=`${parseFloat(rate.value).toFixed(1)}x`);
+
+    fileInput.addEventListener('change', async e=>{
+      const file=e.target.files?.[0]; if(!file) return; showError('');
+      setStatus('Caricamento…'); setControls({canPlay:false,canPause:false,canResume:false,canStop:false});
+      bar.style.width='0%'; preview.value=''; fullText=''; chunks=[]; queue=[]; playing=false;
+      try{
+        const { text } = await extractHybrid(file,(p,pg,tot)=>{ bar.style.width=p+'%'; meta.textContent=`Pagine: ${tot} • Avanzamento: ${p}%`; });
+        fullText=text; meta.textContent+=' • Acquisizione completata.';
+        const show = useSummary.checked ? makeSummary(fullText) : fullText;
+        preview.value=show;
+        if(chunks.length===0){ chunks=splitForTTS(show); }
+        setStatus('Pronto'); setControls({canPlay:chunks.length>0,canPause:false,canResume:false,canStop:false});
+      }catch(err){ console.error(err); showError('Errore generale di estrazione'); setStatus('Pronto'); }
+    });
+
+    function pickVoice(){ const sel=voicesSel.value; const list=speechSynthesis.getVoices(); return sel?(list.find(v=>v.name===sel)||null):null; }
+
+    function feedQueue(){
+      if(speechSynthesis.speaking || speechSynthesis.paused) return;
+      if(!chunks.length){ setStatus('Finito'); setControls({canPlay:true,canPause:false,canResume:false,canStop:false}); playing=false; return; }
+      const text=chunks.shift();
+      const u=new SpeechSynthesisUtterance(text);
+      const v=pickVoice(); if(v) u.voice=v;
+      u.rate=parseFloat(rate.value)||1.0;
+      u.onend=()=>{ feedQueue(); };
+      speechSynthesis.speak(u);
+    }
+
+    playBtn.addEventListener('click',()=>{ if(!chunks.length) return; speechSynthesis.cancel(); playing=true; setStatus('Riproduzione…'); setControls({canPlay:false,canPause:true,canResume:false,canStop:true}); feedQueue(); });
+    pauseBtn.addEventListener('click',()=>{ if(!speechSynthesis.speaking||speechSynthesis.paused) return; speechSynthesis.pause(); setStatus('Pausa'); setControls({canPlay:false,canPause:false,canResume:true,canStop:true}); });
+    resumeBtn.addEventListener('click',()=>{ if(!speechSynthesis.paused) return; speechSynthesis.resume(); setStatus('Riproduzione…'); setControls({canPlay:false,canPause:true,canResume:false,canStop:true}); });
+    stopBtn.addEventListener('click',()=>{ speechSynthesis.cancel(); playing=false; setStatus('Pronto'); setControls({canPlay:chunks.length>0,canPause:false,canResume:false,canStop:false}); });
+  </script>
+</body>
+</html>
